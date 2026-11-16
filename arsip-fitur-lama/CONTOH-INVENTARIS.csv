@@ -1,0 +1,2 @@
+"Room","PC","IP","User","MAC","Broadcast","Fingerprint","HostPublicKey"
+"Lab 1","L1PC01","192.168.10.101","L101","02:00:00:00:00:01","192.168.10.255","SHA256:ISI_DARI_CATATAN_PC","ssh-ed25519 ISI_DARI_CATATAN_PC"

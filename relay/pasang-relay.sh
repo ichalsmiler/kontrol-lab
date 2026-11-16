@@ -46,6 +46,8 @@ After=network-online.target
 ExecStart=$(command -v node) $DIR/relay.js
 WorkingDirectory=$DIR
 DynamicUser=yes
+# File kiriman Admin disimpan di /var/lib/kontrol-lab-relay/file (maks 5 file terbaru).
+StateDirectory=kontrol-lab-relay
 Restart=always
 RestartSec=3
 NoNewPrivileges=yes

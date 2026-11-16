@@ -1,4 +1,4 @@
-param([string]$Config=(Join-Path $env:ProgramData 'LabControl\internet.json'))
+﻿param([string]$Config=(Join-Path $env:ProgramData 'LabControl\internet.json'))
 # Agen di PC lab: berjalan di sesi desktop pengguna (task saat login), menghubungi relay KELUAR,
 # dan hanya menjalankan perintah dari daftar tetap yang tanda tangannya cocok dengan kunci publik Admin.
 $ErrorActionPreference='Stop'
@@ -25,13 +25,14 @@ $name=$env:COMPUTERNAME.ToUpperInvariant()
 $seen=New-Object 'Collections.Generic.List[string]'
 if(Test-Path -LiteralPath $seenFile){foreach($l in Get-Content -LiteralPath $seenFile){if($l){$seen.Add($l)}}}
 $results=New-Object 'Collections.Generic.List[object]'
-$version='1.0'
+$version='1.1'
 
 function Get-Exambro {@(Get-Process -Name ExamBrowser,runningexam -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})}
 
 function Test-Command($c,[double]$relayNow){
     $target=@($c.target | ForEach-Object {[string]$_})
     $message='v1|'+$c.id+'|'+$c.aksi+'|'+($target -join ',')+'|'+([int64]$c.ts)
+    if([string]$c.data){$message+='|'+[string]$c.data}
     try {$sig=[Convert]::FromBase64String([string]$c.sig)} catch {return 'tanda tangan rusak'}
     if(!$rsa.VerifyData([Text.Encoding]::UTF8.GetBytes($message),'SHA256',$sig)){return 'tanda tangan tidak cocok dengan kunci Admin'}
     if(!($target -contains '*') -and !($target | Where-Object {$_ -ieq $name})){return 'bukan untuk PC ini'}
@@ -41,8 +42,38 @@ function Test-Command($c,[double]$relayNow){
     return $null
 }
 
-function Invoke-LabCommand([string]$action){
+# Data kirim-file: "nama|sha256|ukuran", ikut ditandatangani Admin. File disimpan di Documents pengguna ini
+# dan hanya dipakai bila hash-nya cocok; file tidak pernah dibuka atau dijalankan otomatis.
+function Save-LabFile([string]$data){
+    $parts=$data.Split('|')
+    if($parts.Count -ne 3){return @{ok=$false;pesan='data file rusak'}}
+    $fileName=$parts[0].Trim()
+    if(!$fileName -or $fileName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or $fileName -match '^\.+$' -or $fileName.Length -gt 150){return @{ok=$false;pesan='nama file tidak sah'}}
+    $sha=$parts[1].ToLowerInvariant()
+    if($sha -notmatch '^[a-f0-9]{64}$'){return @{ok=$false;pesan='hash file tidak sah'}}
+    $size=[int64]$parts[2]
+    $docs=[Environment]::GetFolderPath('MyDocuments')
+    $dest=Join-Path $docs $fileName
+    if((Test-Path -LiteralPath $dest) -and (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash -ieq $sha){return @{ok=$true;pesan="Sudah ada (sama): $dest"}}
+    $tmp=Join-Path $docs ('~unduhan-'+$sha.Substring(0,12)+'.tmp')
+    try {
+        $wc=New-Object Net.WebClient
+        $wc.Headers.Add('X-Token',[string]$cfg.token)
+        $wc.DownloadFile($relay+'/api/agen/file/'+$sha,$tmp)
+        $wc.Dispose()
+        if((Get-Item -LiteralPath $tmp).Length -ne $size){throw 'ukuran file tidak sama'}
+        if((Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash -ine $sha){throw 'isi file tidak cocok dengan hash dari Admin'}
+        Move-Item -LiteralPath $tmp -Destination $dest -Force
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return @{ok=$false;pesan='Gagal unduh: '+$_.Exception.Message}
+    }
+    return @{ok=$true;pesan="Tersimpan: $dest"}
+}
+
+function Invoke-LabCommand([string]$action,[string]$data){
     switch($action){
+        'kirim-file' {return Save-LabFile $data}
         'exambro-jalankan' {
             if((Get-Exambro).Count){return @{ok=$true;pesan='Exambro sudah berjalan'}}
             $task=Get-ScheduledTask -TaskName 'Lab-Exambro-Auto-Run' -ErrorAction SilentlyContinue
@@ -92,7 +123,7 @@ while($true){
         $seen.Add([string]$c.id)
         while($seen.Count -gt 200){$seen.RemoveAt(0)}
         try {Set-Content -LiteralPath $seenFile -Value $seen -Encoding ASCII} catch {}
-        try {$out=Invoke-LabCommand ([string]$c.aksi)} catch {$out=@{ok=$false;pesan=$_.Exception.Message}}
+        try {$out=Invoke-LabCommand ([string]$c.aksi) ([string]$c.data)} catch {$out=@{ok=$false;pesan=$_.Exception.Message}}
         Write-Log "Jalankan $($c.id) $($c.aksi): $($out.pesan)"
         $results.Add(@{id=[string]$c.id;ok=[bool]$out.ok;pesan=[string]$out.pesan})
     }

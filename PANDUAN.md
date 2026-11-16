@@ -73,6 +73,8 @@ curl -fsSL https://raw.githubusercontent.com/ichalsmiler/kontrol-lab/main/relay/
 "D:\KontrolLab\KontrolLab-Admin.exe" --internet exambro-jalankan
 ```
 
+**Mengirim file ke PC lab** (misalnya file SEB atau Exambro terbaru): klik **Kirim file ke Documents...**, lalu pilih filenya. File diunggah sekali ke relay. Setiap PC sasaran lalu mengunduhnya ke folder **Documents** akun yang sedang login. File lama dengan nama yang sama akan diganti. Kolom *Perintah terakhir* menunjukkan lokasi file di tiap PC, atau alasannya bila gagal. PC memeriksa sidik jari (SHA-256) yang ditandatangani Admin, jadi file yang rusak atau ditukar di jalan akan ditolak. File tidak dibuka atau dijalankan otomatis. Relay menyimpan 5 file terakhir (maksimal 1 GB per file) di `/var/lib/kontrol-lab-relay/file`. PC yang sedang mati tidak ikut menerima, jadi kirim ulang setelah PC itu menyala.
+
 **Supaya bisa dipakai dari luar sekolah:** minta pengelola jaringan meneruskan port TCP 8790 dari IP publik sekolah ke IP server relay, port 8790. Setelah itu ganti alamat relay menjadi `http://<IP-publik>:8790`, lalu buat ulang `kontrol-internet.json` untuk PC lab yang juga harus menghubungi relay lewat internet. Koneksi masih HTTP biasa. Perintah tetap aman dari pemalsuan, tetapi token dan status PC bisa terbaca di jalur internet. Pasang HTTPS bila relay akan dibuka ke publik untuk waktu lama.
 
 Log agen di PC lab: `C:\ProgramData\LabControl\agen-internet.log`. Kode relay dan pemasangnya ada di folder `relay\`. Untuk memperbarui relay, jalankan lagi perintah pasang di atas. Token lama tidak berubah, jadi PC lab tidak perlu dipasang ulang. Bila relay pindah ke server baru, token ikut baru: isi ulang di Admin, buat ulang `kontrol-internet.json`, lalu pasang ulang di tiap PC lab.

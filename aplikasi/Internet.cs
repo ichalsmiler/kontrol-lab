@@ -105,13 +105,59 @@ namespace KontrolLab
         public static string NewId() { return DateTime.Now.ToString("HHmmss") + "-" + Guid.NewGuid().ToString("N").Substring(0, 12); }
 
         // Format pesan yang ditandatangani harus sama persis dengan AGEN-INTERNET.ps1.
-        public static Dictionary<string, object> SignedCommand(RSACryptoServiceProvider key, string action, string[] target)
+        public static Dictionary<string, object> SignedCommand(RSACryptoServiceProvider key, string action, string[] target, string data = "")
         {
             string id = NewId();
             long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
-            string message = "v1|" + id + "|" + action + "|" + string.Join(",", target) + "|" + ts;
+            string message = "v1|" + id + "|" + action + "|" + string.Join(",", target) + "|" + ts + (data.Length > 0 ? "|" + data : "");
             string sig = Convert.ToBase64String(key.SignData(Encoding.UTF8.GetBytes(message), "SHA256"));
-            return new Dictionary<string, object> { { "id", id }, { "aksi", action }, { "target", target }, { "ts", ts }, { "sig", sig } };
+            return new Dictionary<string, object> { { "id", id }, { "aksi", action }, { "target", target }, { "ts", ts }, { "data", data }, { "sig", sig } };
+        }
+
+        public static string Sha256File(string path)
+        {
+            using (var sha = SHA256.Create())
+            using (var f = File.OpenRead(path))
+                return BitConverter.ToString(sha.ComputeHash(f)).Replace("-", "").ToLowerInvariant();
+        }
+
+        // Mengunggah isi file mentah ke relay; progress dipanggil dengan persen 0-100.
+        public static string Upload(InternetSettings s, string path, Action<int> progress)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(Base(s) + "/api/admin/file");
+            req.Method = "POST";
+            req.Timeout = req.ReadWriteTimeout = 60 * 60 * 1000;
+            req.Headers["X-Token"] = s.AdminToken.Trim();
+            req.Proxy = null;
+            req.ContentType = "application/octet-stream";
+            req.AllowWriteStreamBuffering = false;
+            long total = new FileInfo(path).Length;
+            req.ContentLength = total;
+            using (var f = File.OpenRead(path))
+            using (var st = req.GetRequestStream())
+            {
+                var buf = new byte[256 * 1024];
+                long sent = 0; int n, last = -1;
+                while ((n = f.Read(buf, 0, buf.Length)) > 0)
+                {
+                    st.Write(buf, 0, n);
+                    sent += n;
+                    int pct = total == 0 ? 100 : (int)(sent * 100 / total);
+                    if (pct != last) { last = pct; progress(pct); }
+                }
+            }
+            try
+            {
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    return Convert.ToString(((Dictionary<string, object>)Json.DeserializeObject(r.ReadToEnd()))["sha256"]);
+            }
+            catch (WebException ex)
+            {
+                var resp = ex.Response as HttpWebResponse;
+                if (resp == null) throw new Exception("relay tidak terjangkau (" + ex.Message + ")");
+                using (var r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) throw new Exception("relay menolak (" + (int)resp.StatusCode + "): " + r.ReadToEnd());
+            }
         }
 
         public static string ClientConfigJson(InternetSettings s, RSACryptoServiceProvider key)
@@ -161,8 +207,10 @@ namespace KontrolLab
                 Btn("Tutup Exambro", async (s, e) => await Send("exambro-tutup")),
                 Btn("Restart", async (s, e) => await Send("restart")),
                 Btn("Matikan", async (s, e) => await Send("matikan")),
-                Btn("Batalkan", async (s, e) => await Send("batal-matikan")));
+                Btn("Batalkan", async (s, e) => await Send("batal-matikan")),
+                Btn("Kirim file ke Documents...", async (s, e) => await SendFile()));
             bar.Dock = DockStyle.Top;
+            bar.WrapContents = true; // tombol turun ke baris kedua bila jendela sempit
             bar.Padding = new Padding(10, 0, 10, 0);
             summary.Dock = DockStyle.Top;
             summary.Padding = new Padding(12, 0, 0, 0);
@@ -278,6 +326,55 @@ namespace KontrolLab
             catch (Exception ex) { Log(name + " gagal dikirim: " + ex.Message); }
             SetBusy(false);
             await RefreshStatus(false);
+        }
+
+        async Task SendFile()
+        {
+            if (!Ready()) return;
+            int count;
+            string[] target = Targets(out count);
+            if (target.Length == 0) { Log("Centang dulu PC sasarannya, atau pilih sasaran Semua PC."); return; }
+            string path;
+            using (var d = new OpenFileDialog { Title = "Pilih file yang dikirim ke Documents PC lab" })
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                path = d.FileName;
+            }
+            // '|' dipakai sebagai pemisah data bertanda tangan.
+            string fileName = Path.GetFileName(path).Replace("|", "_");
+            long size = new FileInfo(path).Length;
+            string who = target[0] == "*" ? "SEMUA PC yang terhubung (" + count + " online)" : count + " PC: " + string.Join(", ", target);
+            if (MessageBox.Show(this, "Kirim " + fileName + " (" + FormatSize(size) + ") ke folder Documents di " + who + "?\n\nFile dengan nama sama di Documents akan diganti.",
+                    "Kirim file", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            SetBusy(true);
+            try
+            {
+                Log("Menghitung hash " + fileName + "...");
+                string sha = await Task.Run(() => Relay.Sha256File(path));
+                Log("Mengunggah " + fileName + " ke relay...");
+                int shown = -1;
+                string uploaded = await Task.Run(() => Relay.Upload(settings, path, pct =>
+                {
+                    if (pct / 10 != shown) { shown = pct / 10; summary.BeginInvoke(new Action(() => summary.Text = "Mengunggah " + fileName + ": " + pct + "%")); }
+                }));
+                if (uploaded != sha) throw new Exception("hash di relay berbeda; file berubah saat diunggah? Coba lagi.");
+                var cmd = Relay.SignedCommand(key, "kirim-file", target, fileName + "|" + sha + "|" + size);
+                var r = await Task.Run(() => Relay.Call(settings, "POST", "/api/admin/perintah", cmd));
+                lastId = (string)cmd["id"];
+                lastAction = "Kirim " + fileName;
+                Log("File " + fileName + " siap; perintah unduh dikirim ke " + who + ". Langsung diterima " + r["langsungTerkirim"] + " PC. Hasil tiap PC ada di kolom Perintah terakhir.");
+            }
+            catch (Exception ex) { Log("Kirim file gagal: " + ex.Message); }
+            SetBusy(false);
+            await RefreshStatus(false);
+        }
+
+        static string FormatSize(long bytes)
+        {
+            if (bytes >= 1048576) return (bytes / 1048576.0).ToString("0.0") + " MB";
+            if (bytes >= 1024) return (bytes / 1024.0).ToString("0") + " KB";
+            return bytes + " byte";
         }
 
         async Task RefreshStatus(bool verbose)
